@@ -6,12 +6,13 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "proc.h"
-
+#include <stdio.h>
 int
 sys_fork(void)
 {
   return fork();
 }
+
 
 int
 sys_exit(void)
@@ -90,13 +91,50 @@ sys_uptime(void)
   return xticks;
 }
 
-int sys_date(void)
+int
+sys_date(void)
 {
-  struct rtcdate *r;
-  
-  if (argptr(0, (void *)&r, sizeof(*r)) < 0)
-    return -1; // Retorna erro se o argumento não for válido
-
-  cmostime(r);
+  char *ptr;
+  if(argptr(0, &ptr, sizeof(struct rtcdate*)) < 0 )
+   {
+    return -1;
+   }
+  cmostime((struct rtcdate *)ptr);
   return 0;
+
+}
+
+int
+sys_virt2real(void)
+{
+  char *ptr;
+  argptr(0, &ptr, sizeof(char*));
+  struct proc *curproc = myproc();
+  pde_t *pde;
+  pte_t *pgtab;
+  pde = &(curproc->pgdir)[PDX((const void *)ptr)];
+  pgtab = (pte_t*)P2V(PTE_ADDR(*pde));
+  pgtab = &pgtab[PTX((const void *)ptr)];
+  return (int)(P2V(PTE_ADDR(*pgtab) + PTE_FLAGS(*ptr)));
+
+}
+
+int
+sys_num_pages(void)
+{
+  struct proc *curproc = myproc();
+  int temp = curproc->sz/PGSIZE;
+  int temp2 = curproc->sz % PGSIZE;
+  if(temp2 == 0){
+    return temp;
+  }
+  else{
+    return (temp+1);
+  }
+}
+
+int
+sys_forkcow(void)
+{
+  return forkcow();
 }
