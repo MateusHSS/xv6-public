@@ -37,14 +37,13 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
 {
   pde_t *pde;
   pte_t *pgtab;
-
   pde = &pgdir[PDX(va)];
   if(*pde & PTE_P){
     pgtab = (pte_t*)P2V(PTE_ADDR(*pde));
   } else {
     if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
       return 0;
-    // Make sure all those PTE_P bits are zero.
+    // Make sure all those PTE_P bits are zero. 
     memset(pgtab, 0, PGSIZE);
     // The permissions here are overly generous, but they can
     // be further restricted by the permissions in the page table
@@ -332,15 +331,49 @@ copyuvm(pde_t *pgdir, uint sz)
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
+    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0)
       goto bad;
-    }
   }
   return d;
 
 bad:
   freevm(d);
+  return 0;
+}
+
+// Given a parent process's page table, create a copy
+// of it for a child.
+pde_t*
+copyuvmcow(pde_t *pgdir, uint sz)
+{
+  pde_t *d;
+  pte_t *pte;
+  uint pa, i, flags; 
+  
+  if((d = setupkvm()) == 0)
+    return 0;
+  for(i = 0; i < sz; i += PGSIZE){
+    if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
+    {
+      cprintf("walkpgdir error\n");
+      panic("copyuvm: pte should exist");
+    }
+    if(!(*pte & PTE_P))
+      panic("copyuvm: page not present");
+    *pte &= ~PTE_W;
+    *pte |= PTE_COW;
+    pa = PTE_ADDR(*pte);
+    flags = PTE_FLAGS(*pte);
+    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0)
+      goto bad; 
+    addRefCount(pa);
+  }
+  lcr3(V2P(pgdir));
+  return d;
+
+bad:
+  freevm(d);
+  lcr3(V2P(pgdir));
   return 0;
 }
 
@@ -392,3 +425,76 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 //PAGEBREAK!
 // Blank page.
 
+void 
+pagefault(uint error)
+{
+  struct proc *cur = myproc();
+  uint va = rcr2();
+  char *a = (char *)PGROUNDDOWN(va);
+  pte_t *pte;
+  if(!(error & 0x02))
+  {
+    cprintf("Nao e erro de escrita.");
+    return;
+  }
+ 
+  if(cur ==0)
+  {
+    cprintf( "Acesso restrito, processo nao e modo usuario\n");
+    panic("pagefault");
+  }
+
+  if(va >= KERNBASE || (pte = walkpgdir(cur->pgdir, (void*)a, 0)) == 0  || !(*pte & PTE_P) || !(*pte & PTE_U))
+  {
+    cprintf("Acesso ao endereço virtual restrito no endereço 0x%x, kill processo %s de pid %d\n",
+     va, cur->name, cur->pid);
+    cur->killed = 1;
+    return;
+  }
+
+  if(*pte & PTE_W)
+  {
+    panic("Pagina ja tem permissao de escrita");
+  }
+ 
+  if(*pte & PTE_COW)
+    {
+      uint physicalAdress = PTE_ADDR(*pte);
+      uint refCount = getRefCount(physicalAdress);    
+      char* mem;
+
+      if(refCount > 1)
+      {
+
+          if((mem = kalloc()) == 0)
+          {
+            cprintf("Page fault sem memória, terminando o processo");
+            cur->killed=1;
+            return;
+          }
+          memmove(mem, (char*)P2V(physicalAdress), PGSIZE);
+
+          *pte = V2P(mem) | PTE_P | PTE_U | PTE_W; 
+          *pte &= ~PTE_COW;
+          minusRefCount(physicalAdress);
+      }
+      else if(refCount < 0)
+      {
+        cur->killed = 1;
+        panic("Referências incorretas\n");
+        return;
+      }
+      else
+      {
+        *pte &= ~PTE_COW;
+        *pte |= PTE_W;
+      }
+
+      lcr3(V2P(cur->pgdir));
+  }
+  else
+  {
+    cur->killed = 1;
+    return;
+  }
+}
